@@ -227,8 +227,8 @@ pipeline is triggered from.
 | `verify-commit` (`verify-commit`) | only if `verify-commit="true"` | Verifies the cloned commit's signature against the signing infrastructure. | **RHTAS** — Rekor (`rekor-url`), TUF (`tuf-mirror`), Fulcio/OIDC issuer (`oidc-issuer`). |
 | `remediate-maven-dependency` (`maven-use-dep-version`) | if `SELECTED="1"` and `remediation-task="maven-use-dep-version"` | Runs `versions:use-dep-version` to set `PACKAGE` to the exact `FIXED_VERSION`. | **Artifact repository** — Maven repo/mirror (`maven-settings`). |
 | `remediate-ai-dependency` (`ai-remediate-dependency`) | if `SELECTED="1"` and `remediation-task="ai-remediate-dependency"` | Uses the AI coding agent for fixes needing reasoning or a new override. | **AI endpoint / Artifact repository** — configured agent endpoint and Maven mirror. |
-| `re-run-tests` (`maven`) | if `SELECTED="1"` | Runs `mvn package` (surefire unit tests only) against the remediated tree. | **Artifact repository** — Maven repo/mirror (`maven-settings`). |
-| `open-pr` (`open-pr`) | if `SELECTED="1"` | Commits the remediation to an `rhtpa/*` branch, pushes it, and opens a PR/MR (carries the CVE/fix context; adds `Related to #N` when `ISSUE_IID` is set by an issue trigger). Runs on the **agent image** (bundles git/glab/gh). `PR_URL` result. | **SCM / Git repo** — `git push` + `glab mr create` / `gh pr create` (creds from `scm-auth-secret`). |
+| `re-run-tests` (`maven`) | if `SELECTED="1"` and `remediation-task` is supported | Runs `mvn package` (surefire unit tests only) against the remediated tree. | **Artifact repository** — Maven repo/mirror (`maven-settings`). |
+| `open-pr` (`open-pr`) | if `SELECTED="1"` and `remediation-task` is supported | Commits the remediation to an `rhtpa/*` branch, pushes it, and opens a PR/MR (carries the CVE/fix context; adds `Related to #N` when `ISSUE_IID` is set by an issue trigger). Runs on the **agent image** (bundles git/glab/gh). `PR_URL` result. | **SCM / Git repo** — `git push` + `glab mr create` / `gh pr create` (creds from `scm-auth-secret`). |
 
 ### `ci-build-publish` steps
 
@@ -416,12 +416,14 @@ params rather than computing it. There is no build, SBOM upload, or RHTPA scan �
 it clones the repo, runs the selected remediation Task, re-verifies, and opens
 the PR. `remediation-task` selects between the fixed Task references wired into
 the Pipeline and defaults to `maven-use-dep-version`; override it on a
-PipelineRun to select `ai-remediate-dependency`.
+PipelineRun to select `ai-remediate-dependency`. Unsupported values skip the
+remediation, test, and PR tasks.
 Issue-triggered PipelineRuns use this Pipeline default because the trigger does
-not set `remediation-task`. `re-run-tests` and `open-pr` are each gated on
-`SELECTED == "1"`, so passing `SELECTED="0"` (or omitting it — it defaults to
-`"0"`) makes the pipeline a clean no-op after the clone. The guard is repeated
-on both remediation branches and the downstream tasks because Tekton's
+not set `remediation-task`. The remediation, test, and PR tasks require both
+`SELECTED == "1"` and a supported `remediation-task` value, so `SELECTED="0"`
+(or omitting it — it defaults to `"0"`) and unsupported values skip the tail.
+The SELECTED guard is repeated on both remediation branches and the downstream
+tasks because Tekton's
 "skipped-parent still runs the successor" semantics don't short-circuit a
 `runAfter` successor unless the successor's own `when` also fails.
 `verify-commit` is optional. The re-run stops at `mvn package`:
@@ -461,7 +463,8 @@ custom Task must accept `SUBDIRECTORY`, `CVE_ID`, `PACKAGE`, `CURRENT_VERSION`,
 `maven-settings` workspaces. Tekton does not allow a Pipeline parameter in
 `taskRef.name`; to add another custom Task choice, add a PipelineTask with a
 fixed Task reference, gate it on the matching `remediation-task` value, and add
-that value to the parameter's `enum`. The `CHANGED` result is not consumed.
+that value to the supported-value checks on `re-run-tests` and `open-pr`. The
+`CHANGED` result is not consumed.
 
 ### `ci-build-publish`
 
