@@ -145,8 +145,8 @@ metadata:
 spec:
   project: {{ .Values.argocd.project }}
   source:
-    repoURL: {{ .Values.gitops.repoUrl }}
-    targetRevision: {{ .Values.gitops.revision }}
+    repoURL: {{ .Values.gitops.tasksAndPipelinesRepoUrl | default .Values.gitops.repoUrl }}
+    targetRevision: {{ .Values.gitops.tasksAndPipelinesRevision | default .Values.gitops.revision }}
     path: {{ .Values.gitops.tektonPath }}/tasks
     directory:
       recurse: false
@@ -198,8 +198,8 @@ metadata:
 spec:
   project: {{ .Values.argocd.project }}
   source:
-    repoURL: {{ .Values.gitops.repoUrl }}
-    targetRevision: {{ .Values.gitops.revision }}
+    repoURL: {{ .Values.gitops.tasksAndPipelinesRepoUrl | default .Values.gitops.repoUrl }}
+    targetRevision: {{ .Values.gitops.tasksAndPipelinesRevision | default .Values.gitops.revision }}
     path: {{ .Values.gitops.tektonPath }}/pipelines
     directory:
       recurse: false

@@ -65,6 +65,11 @@ deployer:
 gitops:
   repoUrl: "https://github.com/lzspangler/ssc-demo.git"
   revision: "ssc-demo"
+  # The Task and Pipeline Applications can track a different repository from
+  # the demo applications. This is useful when the validated pattern carries
+  # the Tekton resources while app source repos stay in ssc-demo.
+  tasksAndPipelinesRepoUrl: "https://github.com/machacekondra/tssc-validated-pattern.git"
+  tasksAndPipelinesRevision: "main"
   basePath: "automation/gitops"
   # The Tekton resources are NOT under basePath -- they live at the repo root,
   # where pipelines/README.md documents them. Argo applies them from there
