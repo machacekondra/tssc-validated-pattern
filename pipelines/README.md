@@ -86,7 +86,7 @@ This repo defines **eleven** pipelines that share the same tasks and images:
   additions alongside `src/test`.
 - **`pipelines/agentic-cve-remediation.yaml`** — applies a decision (passed in as
   params) to the git project: clone → configurable remediation Task (defaults
-  to `ai-remediate-dependency`) → `mvn package` (unit tests only) → PR/MR. The
+  to `maven-use-dep-version`) → `mvn package` (unit tests only) → PR/MR. The
   remediation tail runs only when `SELECTED="1"`.
 - **`pipelines/ci-build-publish.yaml`** — continuous integration for the
   application repository: clone → `mvn package` (unit tests only) → buildah
@@ -225,7 +225,7 @@ pipeline is triggered from.
 |------------------|-----------|-------------|------------------------------|
 | `clone-repository` (`git-clone`) | always | Clones the source repo at `revision` into the shared `workspace`; exposes `url`/`commit` results. | **SCM / Git repo** — `git clone` over HTTPS (creds from `git-auth` workspace). |
 | `verify-commit` (`verify-commit`) | only if `verify-commit="true"` | Verifies the cloned commit's signature against the signing infrastructure. | **RHTAS** — Rekor (`rekor-url`), TUF (`tuf-mirror`), Fulcio/OIDC issuer (`oidc-issuer`). |
-| `ai-remediate-dependency` (`$(params.remediation-task)`, defaults to `ai-remediate-dependency`) | if `SELECTED="1"` | Runs the selected remediation Task. The default edits `pom.xml` to bump only the vulnerable dependency (`PACKAGE`) to `FIXED_VERSION`, verifies compilation, and leaves the change on the workspace. | Depends on the selected Task; the default uses the **AI model server** and **Maven mirror** (`maven-settings`). |
+| `remediate-dependency` (`$(params.remediation-task)`, default `maven-use-dep-version`) | if `SELECTED="1"` | The default runs `versions:use-dep-version` to set `PACKAGE` to the exact `FIXED_VERSION`; `ai-remediate-dependency` remains selectable for fixes needing reasoning or a new override. | **Artifact repository** — Maven repo/mirror (`maven-settings`). |
 | `re-run-tests` (`maven`) | if `SELECTED="1"` | Runs `mvn package` (surefire unit tests only) against the remediated tree. | **Artifact repository** — Maven repo/mirror (`maven-settings`). |
 | `open-pr` (`open-pr`) | if `SELECTED="1"` | Commits the remediation to an `rhtpa/*` branch, pushes it, and opens a PR/MR (carries the CVE/fix context; adds `Related to #N` when `ISSUE_IID` is set by an issue trigger). Runs on the **agent image** (bundles git/glab/gh). `PR_URL` result. | **SCM / Git repo** — `git push` + `glab mr create` / `gh pr create` (creds from `scm-auth-secret`). |
 
@@ -291,6 +291,7 @@ out. Every task runs unconditionally except `verify-commit` (optional) and
 | `tasks/ai-analyze-cves.yaml` | AI decides per fixable CVE (with severity + available fixed versions); renders one issue title/body/labels triple each |
 | `tasks/open-cve-issues.yaml` | Opens one GitLab/GitHub issue per rendered file, applying the base + per-CVE severity label (runs on the **agent image**) |
 | `tasks/ai-remediate-dependency.yaml` | AI bumps the dependency + verifies compile |
+| `tasks/maven-use-dep-version.yaml` | Default remediation Task; applies the selected fixed version with the Maven Versions Plugin |
 | `tasks/open-pr-cve.yaml` | Task `open-pr` — commits to a branch and opens the PR/MR for CVE remediation (runs on the **agent image** — see note below) |
 | `tasks/open-pr-tests.yaml` | Tests-only PR/MR (no CVE/fix context) — used by the test-generation pipelines; `TEST_CATEGORY` param (unit/integration/functional) controls whether the MR also stages test-scoped `pom.xml` additions |
 | `tasks/gitops-bump-image.yaml` | Bumps `image.tag` in a gitops values file and lands it as an (auto-merged) MR — used by the dev CD pipeline |
@@ -413,7 +414,8 @@ This pipeline is **param-driven**: it takes the remediation decision in as
 params rather than computing it. There is no build, SBOM upload, or RHTPA scan —
 it clones the repo, runs the selected remediation Task, re-verifies, and opens
 the PR. `remediation-task` selects the namespaced Task to run and defaults to
-`ai-remediate-dependency`; override it on a PipelineRun to use another Task.
+`maven-use-dep-version`; override it on a PipelineRun to select `ai-remediate-dependency`
+or another compatible Task.
 Issue-triggered PipelineRuns use this Pipeline default because the trigger does
 not set `remediation-task`. `re-run-tests` and `open-pr` are each gated on
 `SELECTED == "1"`, so passing `SELECTED="0"` (or omitting it — it defaults to
@@ -423,30 +425,38 @@ semantics don't short-circuit a `runAfter` successor unless the successor's own
 `when` also fails. `verify-commit` is optional. The re-run stops at `mvn package`:
 surefire unit tests only — the pom's main build binds failsafe to `**/*FT.java`,
 so `verify` would run the deployment-dependent functional tests (see
-`agentic-cve-remediation-issue-mhm88`). Like the other pipelines the
-agent and `mvn package` run in a pod-local scratch copy to avoid the
-shared-`target/` race.
+`agentic-cve-remediation-issue-mhm88`). When `ai-remediate-dependency` is
+selected, its agent and scratch build use a pod-local copy. `re-run-tests` also
+builds in a pod-local copy to avoid the shared-`target/` race. The default
+`maven-use-dep-version` task updates the shared POM and leaves verification to
+`re-run-tests`.
 
-#### Replacing the remediation Task
+#### Selecting the remediation Task
 
-Create the replacement `Task` in the same namespace as this Pipeline and pass
-its metadata name as `remediation-task` on the PipelineRun:
+The Pipeline's `remediation-task` parameter defaults to `maven-use-dep-version`.
+The `/remediate` TriggerTemplate omits this parameter, so issue-comment runs use
+the Pipeline default. To select the AI task or another compatible Task on a
+PipelineRun, override it in `spec.params`:
 
 ```yaml
 params:
   - name: remediation-task
-    value: my-dependency-remediation
+    value: ai-remediate-dependency
 ```
 
-For issue-triggered runs, change the Pipeline's `remediation-task` default to
-make the replacement the default for `/remediate` as well. The selected Task
-must declare these params because the Pipeline passes them on every run:
-`SUBDIRECTORY`, `CVE_ID`, `PACKAGE`, `CURRENT_VERSION`, `FIXED_VERSION`,
-`JUSTIFICATION`, and `AGENT_IMAGE`. It must also declare a `source` workspace
-and a `maven-settings` workspace (the latter can be optional). The Task should
-apply the requested fix to the shared `source` workspace; the Pipeline then
-runs `mvn package` and opens the PR. The `CHANGED` result from the default Task
-is not consumed by the Pipeline, so a replacement does not need to produce it.
+The default Task runs [`versions:use-dep-version`](https://www.mojohaus.org/versions/versions-maven-plugin/use-dep-version-mojo.html)
+in the shared checkout to apply the exact `FIXED_VERSION` for `PACKAGE`. It
+filters by `CURRENT_VERSION` when supplied and can update existing declarations
+in `dependencies` or `dependencyManagement`; it fails if no tracked POM changes.
+Use `ai-remediate-dependency` for fixes needing a new override for a version
+inherited from an external BOM or a purely transitive dependency.
+
+`re-run-tests` verifies that Maven can resolve the selected version through
+the configured `maven-settings` mirror and build the project. `open-pr` then
+submits the POM changes and includes `JUSTIFICATION` in the PR/MR. A compatible
+custom Task must accept `SUBDIRECTORY`, `CVE_ID`, `PACKAGE`, `CURRENT_VERSION`,
+`FIXED_VERSION`, `JUSTIFICATION`, and `AGENT_IMAGE`, plus `source` and
+`maven-settings` workspaces. The `CHANGED` result is not consumed.
 
 ### `ci-build-publish`
 
