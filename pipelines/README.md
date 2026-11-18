@@ -457,7 +457,9 @@ inherited from an external BOM or a purely transitive dependency.
 
 `re-run-tests` verifies that Maven can resolve the selected version through
 the configured `maven-settings` mirror and build the project. `open-pr` then
-submits the POM changes and includes `JUSTIFICATION` in the PR/MR. A compatible
+submits the POM changes and includes `JUSTIFICATION` in the PR/MR. For GitLab,
+it mounts the `trusted-ca` ConfigMap so both Git and the SCM CLI trust the
+cluster's ingress certificate. A compatible
 custom Task must accept `SUBDIRECTORY`, `CVE_ID`, `PACKAGE`, `CURRENT_VERSION`,
 `FIXED_VERSION`, `JUSTIFICATION`, and `AGENT_IMAGE`, plus `source` and
 `maven-settings` workspaces. Tekton does not allow a Pipeline parameter in

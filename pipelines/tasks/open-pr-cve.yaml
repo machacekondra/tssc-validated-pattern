@@ -69,6 +69,13 @@ spec:
       secret:
         secretName: $(params.SCM_SECRET_NAME)
         optional: false
+    - name: trusted-ca
+      configMap:
+        name: trusted-ca
+        optional: true
+        items:
+          - key: ca-bundle.crt
+            path: ca-bundle.crt
   steps:
     - name: open-pr
       image: $(params.GIT_IMAGE)
@@ -76,6 +83,9 @@ spec:
       volumeMounts:
         - name: scm-secret
           mountPath: /run/secrets/scm
+          readOnly: true
+        - name: trusted-ca
+          mountPath: /mnt/trusted-ca
           readOnly: true
       env:
         - name: HOME
@@ -104,6 +114,19 @@ spec:
 
         TOKEN="$(cat /run/secrets/scm/token)"
         USERNAME="$(cat /run/secrets/scm/username 2>/dev/null || echo oauth2)"
+
+        # GitLab uses the cluster's private ingress CA. Keep the existing
+        # system trust for public SCM hosts, and add this CA only for GitLab.
+        if [ "${SCM_PROVIDER}" = "gitlab" ]; then
+          ca_bundle=/mnt/trusted-ca/ca-bundle.crt
+          if [ ! -r "${ca_bundle}" ]; then
+            echo "ERROR: GitLab requires the trusted-ca ConfigMap with ca-bundle.crt in tssc-app-ci." >&2
+            exit 1
+          fi
+          git config --global http.sslCAInfo "${ca_bundle}"
+          export GIT_SSL_CAINFO="${ca_bundle}"
+          export SSL_CERT_FILE="${ca_bundle}"
+        fi
 
         # The workspace repo was cloned by a different arbitrary OpenShift uid than
         # this pod runs as, so git rejects it ("detected dubious ownership") and then
