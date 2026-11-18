@@ -85,8 +85,9 @@ This repo defines **eleven** pipelines that share the same tasks and images:
   `-Dit.test=*IT,*IntegrationTest`); the MR stages `pom.xml` test-scoped
   additions alongside `src/test`.
 - **`pipelines/agentic-cve-remediation.yaml`** — applies a decision (passed in as
-  params) to the git project: clone → AI bump the dependency → `mvn package`
-  (unit tests only) → PR/MR. The remediation tail runs only when `SELECTED="1"`.
+  params) to the git project: clone → configurable remediation Task (defaults
+  to `ai-remediate-dependency`) → `mvn package` (unit tests only) → PR/MR. The
+  remediation tail runs only when `SELECTED="1"`.
 - **`pipelines/ci-build-publish.yaml`** — continuous integration for the
   application repository: clone → `mvn package` (unit tests only) → buildah
   build + push to the in-cluster Quay → SBOM attach + upload to RHTPA. The
@@ -224,7 +225,7 @@ pipeline is triggered from.
 |------------------|-----------|-------------|------------------------------|
 | `clone-repository` (`git-clone`) | always | Clones the source repo at `revision` into the shared `workspace`; exposes `url`/`commit` results. | **SCM / Git repo** — `git clone` over HTTPS (creds from `git-auth` workspace). |
 | `verify-commit` (`verify-commit`) | only if `verify-commit="true"` | Verifies the cloned commit's signature against the signing infrastructure. | **RHTAS** — Rekor (`rekor-url`), TUF (`tuf-mirror`), Fulcio/OIDC issuer (`oidc-issuer`). |
-| `ai-remediate-dependency` (`ai-remediate-dependency`) | if `SELECTED="1"` | AI edits `pom.xml` to bump only the vulnerable dependency (`PACKAGE`) to `FIXED_VERSION` and confirms it still compiles (scratch build); leaves the change on the workspace. `CHANGED` result. | **AI model server** (reasoning + edits); **Artifact repository** — Maven repo/mirror (`maven-settings`), installed as `~/.m2/settings.xml` so both the verify-compile and the agent's own `mvn` calls resolve through it. A pinned Lightwell `.rhlw` backport does not exist on Central, so without this workspace the verify-compile fails on the version the agent just pinned. |
+| `ai-remediate-dependency` (`$(params.remediation-task)`, defaults to `ai-remediate-dependency`) | if `SELECTED="1"` | Runs the selected remediation Task. The default edits `pom.xml` to bump only the vulnerable dependency (`PACKAGE`) to `FIXED_VERSION`, verifies compilation, and leaves the change on the workspace. | Depends on the selected Task; the default uses the **AI model server** and **Maven mirror** (`maven-settings`). |
 | `re-run-tests` (`maven`) | if `SELECTED="1"` | Runs `mvn package` (surefire unit tests only) against the remediated tree. | **Artifact repository** — Maven repo/mirror (`maven-settings`). |
 | `open-pr` (`open-pr`) | if `SELECTED="1"` | Commits the remediation to an `rhtpa/*` branch, pushes it, and opens a PR/MR (carries the CVE/fix context; adds `Related to #N` when `ISSUE_IID` is set by an issue trigger). Runs on the **agent image** (bundles git/glab/gh). `PR_URL` result. | **SCM / Git repo** — `git push` + `glab mr create` / `gh pr create` (creds from `scm-auth-secret`). |
 
@@ -404,14 +405,17 @@ things worth restating:
 ### `agentic-cve-remediation`
 
 ```
-clone-repository → verify-commit → ai-remediate-dependency → re-run-tests (mvn package) → open-pr
+clone-repository → verify-commit → selected remediation Task → re-run-tests (mvn package) → open-pr
                                                         (whole tail only if SELECTED == "1")
 ```
 
 This pipeline is **param-driven**: it takes the remediation decision in as
 params rather than computing it. There is no build, SBOM upload, or RHTPA scan —
-it clones the repo, has the AI bump the one dependency, re-verifies, and opens the
-PR. `ai-remediate-dependency`, `re-run-tests`, and `open-pr` are each gated on
+it clones the repo, runs the selected remediation Task, re-verifies, and opens
+the PR. `remediation-task` selects the namespaced Task to run and defaults to
+`ai-remediate-dependency`; override it on a PipelineRun to use another Task.
+Issue-triggered PipelineRuns use this Pipeline default because the trigger does
+not set `remediation-task`. `re-run-tests` and `open-pr` are each gated on
 `SELECTED == "1"`, so passing `SELECTED="0"` (or omitting it — it defaults to
 `"0"`) makes the pipeline a clean no-op after the clone. The guard is repeated on
 all three tasks because Tekton's "skipped-parent still runs the successor"
@@ -422,6 +426,27 @@ so `verify` would run the deployment-dependent functional tests (see
 `agentic-cve-remediation-issue-mhm88`). Like the other pipelines the
 agent and `mvn package` run in a pod-local scratch copy to avoid the
 shared-`target/` race.
+
+#### Replacing the remediation Task
+
+Create the replacement `Task` in the same namespace as this Pipeline and pass
+its metadata name as `remediation-task` on the PipelineRun:
+
+```yaml
+params:
+  - name: remediation-task
+    value: my-dependency-remediation
+```
+
+For issue-triggered runs, change the Pipeline's `remediation-task` default to
+make the replacement the default for `/remediate` as well. The selected Task
+must declare these params because the Pipeline passes them on every run:
+`SUBDIRECTORY`, `CVE_ID`, `PACKAGE`, `CURRENT_VERSION`, `FIXED_VERSION`,
+`JUSTIFICATION`, and `AGENT_IMAGE`. It must also declare a `source` workspace
+and a `maven-settings` workspace (the latter can be optional). The Task should
+apply the requested fix to the shared `source` workspace; the Pipeline then
+runs `mvn package` and opens the PR. The `CHANGED` result from the default Task
+is not consumed by the Pipeline, so a replacement does not need to produce it.
 
 ### `ci-build-publish`
 
