@@ -1,0 +1,49 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: tssc-bump-maven
+  labels:
+    app.kubernetes.io/part-of: maven-build-ci
+  annotations:
+    tekton.dev/source: https://github.com/project-lightpath/cli-tools
+    tekton.dev/tags: "security, remediation, maven"
+spec:
+  description: >-
+    Apply the selected dependency version to the shared Maven checkout using
+    tssc bump maven. The remediation Pipeline builds the project and
+    opens the PR.
+  params:
+    - name: SUBDIRECTORY
+      type: string
+      default: source
+    - name: PACKAGE
+      type: string
+      description: Maven coordinates (groupId:artifactId) to update.
+    - name: CURRENT_VERSION
+      type: string
+      description: Current version to match. Leave empty to filter by coordinates only.
+      default: ""
+    - name: FIXED_VERSION
+      type: string
+  workspaces:
+    - name: source
+    - name: maven-settings
+      optional: true
+      readOnly: true
+      description: Accepted for compatibility with remediation tasks that use a Maven mirror.
+  steps:
+    - name: remediate
+      image: quay.io/project-lightpath/tssc-cli-tools:latest
+      imagePullPolicy: Always
+      securityContext:
+        # The checkout is owned by UID 0, and tssc replaces POMs in place.
+        runAsUser: 0
+      command: ["/usr/bin/tssc"]
+      args:
+        - bump
+        - maven
+        - --repo=$(workspaces.source.path)/$(params.SUBDIRECTORY)
+        - --package=$(params.PACKAGE)
+        - --from=$(params.CURRENT_VERSION)
+        - --to=$(params.FIXED_VERSION)
+        - --pin-transitive=false

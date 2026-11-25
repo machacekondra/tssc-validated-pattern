@@ -85,8 +85,9 @@ This repo defines **eleven** pipelines that share the same tasks and images:
   `-Dit.test=*IT,*IntegrationTest`); the MR stages `pom.xml` test-scoped
   additions alongside `src/test`.
 - **`pipelines/agentic-cve-remediation.yaml`** — applies a decision (passed in as
-  params) to the git project: clone → AI bump the dependency → `mvn package`
-  (unit tests only) → PR/MR. The remediation tail runs only when `SELECTED="1"`.
+  params) to the git project: clone → configurable remediation Task (defaults
+  to `ai-remediate-dependency`) → `mvn package` (unit tests only) → PR/MR. The
+  remediation tail runs only when `SELECTED="1"`.
 - **`pipelines/ci-build-publish.yaml`** — continuous integration for the
   application repository: clone → `mvn package` (unit tests only) → buildah
   build + push to the in-cluster Quay → SBOM attach + upload to RHTPA. The
@@ -224,7 +225,7 @@ pipeline is triggered from.
 |------------------|-----------|-------------|------------------------------|
 | `clone-repository` (`git-clone`) | always | Clones the source repo at `revision` into the shared `workspace`; exposes `url`/`commit` results. | **SCM / Git repo** — `git clone` over HTTPS (creds from `git-auth` workspace). |
 | `verify-commit` (`verify-commit`) | only if `verify-commit="true"` | Verifies the cloned commit's signature against the signing infrastructure. | **RHTAS** — Rekor (`rekor-url`), TUF (`tuf-mirror`), Fulcio/OIDC issuer (`oidc-issuer`). |
-| `ai-remediate-dependency` (`ai-remediate-dependency`) | if `SELECTED="1"` | AI edits `pom.xml` to bump only the vulnerable dependency (`PACKAGE`) to `FIXED_VERSION` and confirms it still compiles (scratch build); leaves the change on the workspace. `CHANGED` result. | **AI model server** (reasoning + edits); **Artifact repository** — Maven repo/mirror (`maven-settings`), installed as `~/.m2/settings.xml` so both the verify-compile and the agent's own `mvn` calls resolve through it. A pinned Lightwell `.rhlw` backport does not exist on Central, so without this workspace the verify-compile fails on the version the agent just pinned. |
+| `remediate-dependency` (`$(params.remediation-task)`, default `ai-remediate-dependency`) | if `SELECTED="1"` | The configured AI agent applies the fix and verifies compilation. Select `tssc-bump-maven` to update an existing Maven dependency declaration with the CLI. | **AI model endpoint** and **Maven mirror** (`maven-settings`) for the default task. |
 | `re-run-tests` (`maven`) | if `SELECTED="1"` | Runs `mvn package` (surefire unit tests only) against the remediated tree. | **Artifact repository** — Maven repo/mirror (`maven-settings`). |
 | `open-pr` (`open-pr`) | if `SELECTED="1"` | Commits the remediation to an `rhtpa/*` branch, pushes it, and opens a PR/MR (carries the CVE/fix context; adds `Related to #N` when `ISSUE_IID` is set by an issue trigger). Runs on the **agent image** (bundles git/glab/gh). `PR_URL` result. | **SCM / Git repo** — `git push` + `glab mr create` / `gh pr create` (creds from `scm-auth-secret`). |
 
@@ -289,7 +290,8 @@ out. Every task runs unconditionally except `verify-commit` (optional) and
 | `tasks/conforma-policy-check.yaml` | Conforma gate → must-fix CVE set |
 | `tasks/ai-analyze-cves.yaml` | AI decides per fixable CVE (with severity + available fixed versions); renders one issue title/body/labels triple each |
 | `tasks/open-cve-issues.yaml` | Opens one GitLab/GitHub issue per rendered file, applying the base + per-CVE severity label (runs on the **agent image**) |
-| `tasks/ai-remediate-dependency.yaml` | AI bumps the dependency + verifies compile |
+| `tasks/ai-remediate-dependency.yaml` | Default remediation Task. The AI agent bumps the dependency and verifies compilation. |
+| `tasks/tssc-bump-maven.yaml` | Optional remediation Task that applies the selected fixed version with `tssc bump maven` |
 | `tasks/open-pr-cve.yaml` | Task `open-pr` — commits to a branch and opens the PR/MR for CVE remediation (runs on the **agent image** — see note below) |
 | `tasks/open-pr-tests.yaml` | Tests-only PR/MR (no CVE/fix context) — used by the test-generation pipelines; `TEST_CATEGORY` param (unit/integration/functional) controls whether the MR also stages test-scoped `pom.xml` additions |
 | `tasks/gitops-bump-image.yaml` | Bumps `image.tag` in a gitops values file and lands it as an (auto-merged) MR — used by the dev CD pipeline |
@@ -404,14 +406,18 @@ things worth restating:
 ### `agentic-cve-remediation`
 
 ```
-clone-repository → verify-commit → ai-remediate-dependency → re-run-tests (mvn package) → open-pr
+clone-repository → verify-commit → selected remediation Task → re-run-tests (mvn package) → open-pr
                                                         (whole tail only if SELECTED == "1")
 ```
 
 This pipeline is **param-driven**: it takes the remediation decision in as
 params rather than computing it. There is no build, SBOM upload, or RHTPA scan —
-it clones the repo, has the AI bump the one dependency, re-verifies, and opens the
-PR. `ai-remediate-dependency`, `re-run-tests`, and `open-pr` are each gated on
+it clones the repo, runs the selected remediation Task, re-verifies, and opens
+the PR. `remediation-task` selects the namespaced Task to run and defaults to
+`ai-remediate-dependency`; override it on a PipelineRun to select `tssc-bump-maven`
+or another compatible Task.
+Issue-triggered PipelineRuns use this Pipeline default because the trigger does
+not set `remediation-task`. `re-run-tests` and `open-pr` are each gated on
 `SELECTED == "1"`, so passing `SELECTED="0"` (or omitting it — it defaults to
 `"0"`) makes the pipeline a clean no-op after the clone. The guard is repeated on
 all three tasks because Tekton's "skipped-parent still runs the successor"
@@ -419,9 +425,39 @@ semantics don't short-circuit a `runAfter` successor unless the successor's own
 `when` also fails. `verify-commit` is optional. The re-run stops at `mvn package`:
 surefire unit tests only — the pom's main build binds failsafe to `**/*FT.java`,
 so `verify` would run the deployment-dependent functional tests (see
-`agentic-cve-remediation-issue-mhm88`). Like the other pipelines the
-agent and `mvn package` run in a pod-local scratch copy to avoid the
-shared-`target/` race.
+`agentic-cve-remediation-issue-mhm88`). The AI task runs its agent and scratch
+build in a pod-local copy. `re-run-tests` also builds in a pod-local copy to avoid
+the shared-`target/` race. The `tssc-bump-maven` task updates the shared POM
+and leaves verification to `re-run-tests`.
+
+#### Selecting the remediation Task
+
+The Pipeline's `remediation-task` parameter defaults to `ai-remediate-dependency`.
+The `/remediate` TriggerTemplate omits this parameter, so issue-comment runs use
+the Pipeline default. To select the CLI task or another compatible Task on a
+PipelineRun, override it in `spec.params`:
+
+```yaml
+params:
+  - name: remediation-task
+    value: tssc-bump-maven
+```
+
+The CLI Task runs [`tssc bump maven`](https://github.com/project-lightpath/cli-tools/pull/1)
+from the CLI image to apply `FIXED_VERSION` for `PACKAGE` in the shared
+checkout. It checks `CURRENT_VERSION` when supplied and can update dependency
+versions defined as properties in local parent POMs. The CLI succeeds when the
+dependency is already at `FIXED_VERSION` and fails when it cannot apply the bump.
+The default AI task can add an override for a version inherited from an
+external BOM or resolved through a transitive dependency.
+
+`re-run-tests` verifies that Maven can resolve the selected version through
+the configured `maven-settings` mirror and build the project. `open-pr` then
+submits the POM changes and includes `JUSTIFICATION` in the PR/MR. The Pipeline
+passes `SUBDIRECTORY`, `CVE_ID`, `PACKAGE`, `CURRENT_VERSION`, `FIXED_VERSION`,
+`JUSTIFICATION`, and `AGENT_IMAGE` to the selected Task. Custom Tasks declare
+the parameters they use and accept the `source` and `maven-settings` workspaces.
+The `CHANGED` result is not consumed.
 
 ### `ci-build-publish`
 
@@ -1342,6 +1378,7 @@ many lookups failed so a degraded run is visible rather than merely quieter.
    or just the ones you use):
    ```
    oc -n tssc-app-ci apply -f tasks/
+   oc -n tssc-app-ci apply -f config/agent-skills-maven-remediation.yaml
    oc -n tssc-app-ci apply -f config/agent-skills-test-generation-unit.yaml
    oc -n tssc-app-ci apply -f config/agent-skills-test-generation-integration.yaml
    oc -n tssc-app-ci apply -f config/agent-skills-test-generation-functional.yaml

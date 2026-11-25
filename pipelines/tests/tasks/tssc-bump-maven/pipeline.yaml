@@ -1,0 +1,79 @@
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: tssc-bump-maven-it
+spec:
+  description: >-
+    Integration test for the tssc-bump-maven Task. Creates a small Maven project,
+    applies the requested dependency version, and verifies the updated POM.
+  workspaces:
+    - name: source
+  tasks:
+    - name: setup-maven-project
+      taskSpec:
+        workspaces:
+          - name: source
+        steps:
+          - name: create-pom
+            image: alpine:3.24
+            script: |
+              set -eu
+              project_dir="$(workspaces.source.path)/source"
+              mkdir -p "$project_dir"
+              cat > "$project_dir/pom.xml" <<'EOF'
+              <project xmlns="http://maven.apache.org/POM/4.0.0"
+                       xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                       xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+                <modelVersion>4.0.0</modelVersion>
+                <groupId>com.example</groupId>
+                <artifactId>tssc-bump-maven-it</artifactId>
+                <version>1.0.0</version>
+                <dependencies>
+                  <dependency>
+                    <groupId>org.apache.commons</groupId>
+                    <artifactId>commons-lang3</artifactId>
+                    <version>3.14.0</version>
+                  </dependency>
+                </dependencies>
+              </project>
+              EOF
+      workspaces:
+        - name: source
+          workspace: source
+
+    - name: bump-maven
+      runAfter:
+        - setup-maven-project
+      taskRef:
+        name: tssc-bump-maven
+      params:
+        - name: PACKAGE
+          value: org.apache.commons:commons-lang3
+        - name: CURRENT_VERSION
+          value: 3.14.0
+        - name: FIXED_VERSION
+          value: 3.15.0
+      workspaces:
+        - name: source
+          workspace: source
+
+    - name: verify-updated-version
+      runAfter:
+        - bump-maven
+      taskSpec:
+        workspaces:
+          - name: source
+        steps:
+          - name: assert-version
+            image: alpine:3.24
+            script: |
+              set -eu
+              pom="$(workspaces.source.path)/source/pom.xml"
+              grep -Eq '<version>[[:space:]]*3\.15\.0[[:space:]]*</version>' "$pom"
+              if grep -Eq '<version>[[:space:]]*3\.14\.0[[:space:]]*</version>' "$pom"; then
+                echo "The old dependency version remains in $pom" >&2
+                exit 1
+              fi
+      workspaces:
+        - name: source
+          workspace: source

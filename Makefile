@@ -9,8 +9,9 @@ KIND_CLUSTER_NAME ?= ssc-demo-integration
 KIND_PROVIDER ?= docker
 INTEGRATION_NAMESPACE ?= cve-remediation-it
 INTEGRATION_BIN_DIR ?= /tmp/ssc-demo-integration/bin
+KUBECTL_CONTEXT ?=
 
-.PHONY: kind-integration-install-tools kind-integration-bootstrap kind-integration-down
+.PHONY: kind-integration-install-tools kind-integration-bootstrap kind-integration-test kind-integration-down integration-test
 
 ## Install pinned Kind and kubectl binaries under INTEGRATION_BIN_DIR.
 kind-integration-install-tools:
@@ -29,6 +30,21 @@ kind-integration-bootstrap:
 	 TEKTON_PIPELINES_VERSION="$(TEKTON_PIPELINES_VERSION)" \
 	 INTEGRATION_NAMESPACE="$(INTEGRATION_NAMESPACE)" \
 	 bash pipelines/tests/kind/bootstrap.sh up
+
+## Run the provider-neutral tssc-bump-maven integration test on the Kind cluster.
+kind-integration-test: KUBECTL_CONTEXT = kind-$(KIND_CLUSTER_NAME)
+kind-integration-test: integration-test
+
+## Run the provider-neutral tssc-bump-maven integration test on KUBECTL_CONTEXT.
+integration-test:
+	@if [[ -z "$(KUBECTL_CONTEXT)" ]]; then \
+	  printf 'Set KUBECTL_CONTEXT to the Kubernetes context to test.\n' >&2; \
+	  exit 2; \
+	fi
+	@PATH="$(INTEGRATION_BIN_DIR):$$PATH" \
+	 KUBECTL_CONTEXT="$(KUBECTL_CONTEXT)" \
+	 INTEGRATION_NAMESPACE="$(INTEGRATION_NAMESPACE)" \
+	 bash pipelines/tests/tasks/tssc-bump-maven/run.sh
 
 ## Delete only the Kind cluster used by these integration checks.
 kind-integration-down:

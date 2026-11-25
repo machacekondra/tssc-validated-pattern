@@ -1,4 +1,4 @@
-name: Kind Integration Test Bootstrap
+name: Kind Integration Tests
 
 on:
   pull_request:
@@ -8,8 +8,8 @@ permissions:
   contents: read
 
 jobs:
-  bootstrap:
-    name: Bootstrap Kind and Tekton
+  integration:
+    name: Bootstrap Kind and run integration tests
     runs-on: ubuntu-latest
     timeout-minutes: 35
     steps:
@@ -21,6 +21,9 @@ jobs:
 
       - name: Bootstrap cluster and Tekton
         run: make kind-integration-bootstrap
+
+      - name: Run all integration tests
+        run: make kind-integration-test
 
       - name: Delete Kind cluster
         if: always()
